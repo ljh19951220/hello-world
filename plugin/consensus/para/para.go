@@ -1,0 +1,510 @@
+// Copyright Fuzamei Corp. 2018 All Rights Reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package para
+
+import (
+	"encoding/hex"
+	"fmt"
+	"sync"
+
+	"sort"
+
+	log "github.com/33cn/chain33/common/log/log15"
+
+	"sync/atomic"
+
+	"time"
+
+	"github.com/33cn/chain33/client/api"
+	"github.com/33cn/chain33/common"
+	"github.com/33cn/chain33/common/crypto"
+	"github.com/33cn/chain33/common/merkle"
+	"github.com/33cn/chain33/queue"
+	"github.com/33cn/chain33/rpc/grpcclient"
+	drivers "github.com/33cn/chain33/system/consensus"
+	cty "github.com/33cn/chain33/system/dapp/coins/types"
+	"github.com/33cn/chain33/types"
+	paracross "github.com/33cn/plugin/plugin/dapp/paracross/types"
+	pt "github.com/33cn/plugin/plugin/dapp/paracross/types"
+)
+
+const (
+	minBlockNum = 100 //min block number startHeight before lastHeight in mainchain
+
+	defaultGenesisBlockTime int64 = 1514533390
+	//current miner tx take any privatekey for unify all nodes sign purpose, and para chain is free
+	minerPrivateKey                      = "6da92a632ab7deb67d38c0f6560bcfed28167998f6496db64c258d5e8393a81b"
+	defaultGenesisAmount           int64 = 1e8
+	poolMainBlockSec               int64 = 5
+	defaultEmptyBlockInterval      int64 = 50 //write empty block every interval blocks in mainchain
+	defaultSearchMatchedBlockDepth int32 = 10000
+)
+
+var (
+	plog     = log.New("module", "para")
+	zeroHash [32]byte
+)
+
+func init() {
+	drivers.Reg("para", New)
+	drivers.QueryData.Register("para", &client{})
+}
+
+type client struct {
+	*drivers.BaseClient
+	grpcClient      types.Chain33Client
+	execAPI         api.ExecutorAPI
+	caughtUp        int32
+	commitMsgClient *commitMsgClient
+	blockSyncClient *blockSyncClient
+	multiDldCli     *multiDldClient
+	jumpDldCli      *jumpDldClient
+	minerPrivateKey crypto.PrivKey
+	wg              sync.WaitGroup
+	subCfg          *subConfig
+	dldCfg          *downloadClient
+	isClosed        int32
+	quitCreate      chan struct{}
+}
+
+type subConfig struct {
+	WriteBlockSeconds       int64    `json:"writeBlockSeconds,omitempty"`
+	ParaRemoteGrpcClient    string   `json:"paraRemoteGrpcClient,omitempty"`
+	StartHeight             int64    `json:"startHeight,omitempty"`
+	GenesisBlockTime        int64    `json:"genesisBlockTime,omitempty"`
+	GenesisStartHeightSame  bool     `json:"genesisStartHeightSame,omitempty"`
+	EmptyBlockInterval      []string `json:"emptyBlockInterval,omitempty"`
+	AuthAccount             string   `json:"authAccount,omitempty"`
+	WaitBlocks4CommitMsg    int32    `json:"waitBlocks4CommitMsg,omitempty"`
+	GenesisAmount           int64    `json:"genesisAmount,omitempty"`
+	MainBlockHashForkHeight int64    `json:"mainBlockHashForkHeight,omitempty"`
+	WaitConsensStopTimes    uint32   `json:"waitConsensStopTimes,omitempty"`
+	MaxCacheCount           int64    `json:"maxCacheCount,omitempty"`
+	MaxSyncErrCount         int32    `json:"maxSyncErrCount,omitempty"`
+	BatchFetchBlockCount    int64    `json:"batchFetchBlockCount,omitempty"`
+	ParaConsensStartHeight  int64    `json:"paraConsensStartHeight,omitempty"`
+	MultiDownloadOpen       bool     `json:"multiDownloadOpen,omitempty"`
+	MultiDownInvNumPerJob   int64    `json:"multiDownInvNumPerJob,omitempty"`
+	MultiDownJobBuffNum     uint32   `json:"multiDownJobBuffNum,omitempty"`
+	MultiDownServerRspTime  uint32   `json:"multiDownServerRspTime,omitempty"`
+	RmCommitParamMainHeight int64    `json:"rmCommitParamMainHeight,omitempty"`
+	JumpDownloadClose       bool     `json:"jumpDownloadClose,omitempty"`
+}
+
+// New function to init paracross env
+func New(cfg *types.Consensus, sub []byte) queue.Module {
+	c := drivers.NewBaseClient(cfg)
+	var subcfg subConfig
+	if sub != nil {
+		types.MustDecode(sub, &subcfg)
+	}
+	if subcfg.GenesisAmount <= 0 {
+		subcfg.GenesisAmount = defaultGenesisAmount
+	}
+
+	if subcfg.WriteBlockSeconds <= 0 {
+		subcfg.WriteBlockSeconds = poolMainBlockSec
+	}
+
+	if subcfg.GenesisBlockTime <= 0 {
+		subcfg.GenesisBlockTime = defaultGenesisBlockTime
+	}
+
+	emptyInterval, err := parseEmptyBlockInterval(subcfg.EmptyBlockInterval)
+	if err != nil {
+		panic("para EmptyBlockInterval config not correct")
+	}
+	err = checkEmptyBlockInterval(emptyInterval)
+	if err != nil {
+		panic("para EmptyBlockInterval config not correct")
+	}
+
+	if subcfg.BatchFetchBlockCount <= 0 {
+		subcfg.BatchFetchBlockCount = types.MaxBlockCountPerTime
+	}
+	if subcfg.BatchFetchBlockCount > types.MaxBlockCountPerTime {
+		panic(fmt.Sprintf("BatchFetchBlockCount=%d should be <= %d ", subcfg.BatchFetchBlockCount, types.MaxBlockCountPerTime))
+	}
+
+	pk, err := hex.DecodeString(minerPrivateKey)
+	if err != nil {
+		panic(err)
+	}
+	secp, err := crypto.New(types.GetSignName("", types.SECP256K1))
+	if err != nil {
+		panic(err)
+	}
+	priKey, err := secp.PrivKeyFromBytes(pk)
+	if err != nil {
+		panic(err)
+	}
+
+	para := &client{
+		BaseClient:      c,
+		minerPrivateKey: priKey,
+		subCfg:          &subcfg,
+		quitCreate:      make(chan struct{}),
+	}
+
+	para.dldCfg = &downloadClient{}
+	para.dldCfg.emptyInterval = append(para.dldCfg.emptyInterval, emptyInterval...)
+
+	para.commitMsgClient = &commitMsgClient{
+		paraClient:           para,
+		authAccount:          subcfg.AuthAccount,
+		waitMainBlocks:       waitBlocks4CommitMsg,
+		waitConsensStopTimes: waitConsensStopTimes,
+		consensHeight:        -2,
+		sendingHeight:        -1,
+		consensDoneHeight:    -1,
+		resetCh:              make(chan interface{}, 1),
+		quit:                 make(chan struct{}),
+	}
+	if subcfg.WaitBlocks4CommitMsg > 0 {
+		para.commitMsgClient.waitMainBlocks = subcfg.WaitBlocks4CommitMsg
+	}
+
+	if subcfg.WaitConsensStopTimes > 0 {
+		para.commitMsgClient.waitConsensStopTimes = subcfg.WaitConsensStopTimes
+	}
+
+	// 设置平行链共识起始高度，在共识高度为-1也就是从未共识过的环境中允许从设置的非0起始高度开始共识
+	//note：只有在主链LoopCheckCommitTxDoneForkHeight之后才支持设置ParaConsensStartHeight
+	if subcfg.ParaConsensStartHeight > 0 {
+		para.commitMsgClient.consensDoneHeight = subcfg.ParaConsensStartHeight - 1
+	}
+
+	para.blockSyncClient = &blockSyncClient{
+		paraClient:      para,
+		notifyChan:      make(chan bool, 1),
+		quitChan:        make(chan struct{}),
+		maxCacheCount:   defaultMaxCacheCount,
+		maxSyncErrCount: defaultMaxSyncErrCount,
+	}
+	if subcfg.MaxCacheCount > 0 {
+		para.blockSyncClient.maxCacheCount = subcfg.MaxCacheCount
+	}
+	if subcfg.MaxSyncErrCount > 0 {
+		para.blockSyncClient.maxSyncErrCount = subcfg.MaxSyncErrCount
+	}
+
+	para.multiDldCli = &multiDldClient{
+		paraClient:    para,
+		invNumPerJob:  defaultInvNumPerJob,
+		jobBufferNum:  defaultJobBufferNum,
+		serverTimeout: maxServerRspTimeout,
+	}
+	if subcfg.MultiDownInvNumPerJob > 0 {
+		para.multiDldCli.invNumPerJob = subcfg.MultiDownInvNumPerJob
+	}
+	if subcfg.MultiDownJobBuffNum > 0 {
+		para.multiDldCli.jobBufferNum = subcfg.MultiDownJobBuffNum
+	}
+
+	if subcfg.MultiDownServerRspTime > 0 {
+		para.multiDldCli.serverTimeout = subcfg.MultiDownServerRspTime
+	}
+
+	para.jumpDldCli = &jumpDldClient{paraClient: para}
+
+	c.SetChild(para)
+	return para
+}
+
+//["0:50","100:20","500:30"]
+func parseEmptyBlockInterval(cfg []string) ([]*emptyBlockInterval, error) {
+	var emptyInter []*emptyBlockInterval
+	if len(cfg) == 0 {
+		interval := &emptyBlockInterval{startHeight: 0, interval: defaultEmptyBlockInterval}
+		emptyInter = append(emptyInter, interval)
+		return emptyInter, nil
+	}
+
+	list := make(map[int64]int64)
+	var seq []int64
+	for _, e := range cfg {
+		ret, err := divideStr2Int64s(e, ":")
+		if err != nil {
+			plog.Error("parse empty block inter config", "str", e)
+			return nil, err
+		}
+		seq = append(seq, ret[0])
+		list[ret[0]] = ret[1]
+	}
+	sort.Slice(seq, func(i, j int) bool { return seq[i] < seq[j] })
+	for _, h := range seq {
+		emptyInter = append(emptyInter, &emptyBlockInterval{startHeight: h, interval: list[h]})
+	}
+	return emptyInter, nil
+}
+
+func checkEmptyBlockInterval(in []*emptyBlockInterval) error {
+	for i := 0; i < len(in); i++ {
+		if i == 0 && in[i].startHeight != 0 {
+			plog.Error("EmptyBlockInterval,first blockHeight should be 0", "height", in[i].startHeight)
+			return types.ErrInvalidParam
+		}
+		if i > 0 && in[i].startHeight <= in[i-1].startHeight {
+			plog.Error("EmptyBlockInterval,blockHeight should be sequence", "preHeight", in[i-1].startHeight, "laterHeight", in[i].startHeight)
+			return types.ErrInvalidParam
+		}
+		if in[i].interval <= 0 {
+			plog.Error("EmptyBlockInterval,interval should > 0", "height", in[i].startHeight)
+			return types.ErrInvalidParam
+		}
+	}
+	return nil
+}
+
+//para 不检查任何的交易
+func (client *client) CheckBlock(parent *types.Block, current *types.BlockDetail) error {
+	err := checkMinerTx(current)
+	return err
+}
+
+func (client *client) Close() {
+	atomic.StoreInt32(&client.isClosed, 1)
+	close(client.commitMsgClient.quit)
+	close(client.quitCreate)
+	close(client.blockSyncClient.quitChan)
+	client.wg.Wait()
+
+	client.BaseClient.Close()
+
+	plog.Info("consensus para closed")
+}
+
+func (client *client) isCancel() bool {
+	return atomic.LoadInt32(&client.isClosed) == 1
+}
+
+func (client *client) SetQueueClient(c queue.Client) {
+	plog.Info("Enter SetQueueClient method of Para consensus")
+	client.InitClient(c, func() {
+		client.InitBlock()
+	})
+	go client.EventLoop()
+	client.wg.Add(1)
+	go client.commitMsgClient.handler()
+	client.wg.Add(1)
+	go client.CreateBlock()
+	client.wg.Add(1)
+	go client.blockSyncClient.syncBlocks()
+}
+//初始化区块
+func (client *client) InitBlock() {
+	var err error
+
+	client.execAPI = api.New(client.BaseClient.GetAPI(), client.grpcClient)
+	cfg := client.GetAPI().GetConfig()
+	//NewMainChainClient 创建一个平行链的 主链 grpc chain33 客户端
+	grpcCli, err := grpcclient.NewMainChainClient(cfg, "")
+	if err != nil {
+		panic(err)
+	}
+	client.grpcClient = grpcCli
+	//适配在自共识合约配置前有自共识的平行链项目，fork之后，采用合约配置
+	err = client.commitMsgClient.setSelfConsEnable()
+	if err != nil {
+		panic(err)
+	}
+
+	block, err := client.RequestLastBlock()
+	if err != nil {
+		panic(err)
+	}
+
+	if block == nil {
+		if client.subCfg.StartHeight <= 0 {
+			panic(fmt.Sprintf("startHeight(%d) should be more than 0 in mainchain", client.subCfg.StartHeight))
+		}
+		//平行链创世区块对应主链hash为startHeight-1的那个block的hash
+		mainHash := client.GetStartMainHash(client.subCfg.StartHeight - 1)
+		// 创世区块
+		newblock := &types.Block{}
+		newblock.Height = 0
+		newblock.BlockTime = client.subCfg.GenesisBlockTime
+		newblock.ParentHash = zeroHash[:]
+		newblock.MainHash = mainHash
+
+		//缺省是减1,但有些特殊项目方6.2.0版本升级上来要求blockhash不变，则需与6.2.0保持一致，不减一
+		newblock.MainHeight = client.subCfg.StartHeight - 1
+		if client.subCfg.GenesisStartHeightSame {
+			newblock.MainHeight = client.subCfg.StartHeight
+		}
+		tx := client.CreateGenesisTx()
+		newblock.Txs = tx
+		newblock.TxHash = merkle.CalcMerkleRoot(cfg, newblock.GetMainHeight(), newblock.Txs)
+		err := client.blockSyncClient.createGenesisBlock(newblock)
+		if err != nil {
+			panic(fmt.Sprintf("para chain create genesis block,err=%s", err.Error()))
+		}
+		err = client.createLocalGenesisBlock(newblock)
+		if err != nil {
+			panic(fmt.Sprintf("para chain create local genesis block,err=%s", err.Error()))
+		}
+
+	} else {
+		client.SetCurrentBlock(block)
+	}
+
+	plog.Debug("para consensus init parameter", "mainBlockHashForkHeight", client.subCfg.MainBlockHashForkHeight)
+
+}
+
+// GetStartMainHash 获取start
+func (client *client) GetStartMainHash(height int64) []byte {
+	lastHeight, err := client.GetLastHeightOnMainChain()
+	if err != nil {
+		panic(err)
+	}
+	if lastHeight < height {
+		panic(fmt.Sprintf("lastHeight(%d) less than startHeight(%d) in mainchain", lastHeight, height))
+	}
+
+	if height > 0 {
+		hint := time.NewTicker(time.Second * time.Duration(client.subCfg.WriteBlockSeconds))
+		for lastHeight < height+minBlockNum {
+			select {
+			case <-hint.C:
+				plog.Info("Waiting lastHeight increase......", "lastHeight", lastHeight, "startHeight", height)
+			default:
+				lastHeight, err = client.GetLastHeightOnMainChain()
+				if err != nil {
+					panic(err)
+				}
+				time.Sleep(time.Second)
+			}
+		}
+		hint.Stop()
+		plog.Info(fmt.Sprintf("lastHeight more than %d blocks after startHeight", minBlockNum), "lastHeight", lastHeight, "startHeight", height)
+	}
+
+	hash, err := client.GetHashByHeightOnMainChain(height)
+	if err != nil {
+		panic(err)
+	}
+	plog.Info("the start hash in mainchain", "height", height, "hash", hex.EncodeToString(hash))
+	return hash
+}
+
+func (client *client) CreateGenesisTx() (ret []*types.Transaction) {
+	var tx types.Transaction
+	cfg := client.GetAPI().GetConfig()
+	tx.Execer = []byte(cfg.ExecName(cty.CoinsX))
+	tx.To = client.Cfg.Genesis
+	//gen payload
+	g := &cty.CoinsAction_Genesis{}
+	g.Genesis = &types.AssetsGenesis{}
+	g.Genesis.Amount = client.subCfg.GenesisAmount * types.Coin
+	tx.Payload = types.Encode(&cty.CoinsAction{Value: g, Ty: cty.CoinsActionGenesis})
+	ret = append(ret, &tx)
+	return
+}
+
+func (client *client) ProcEvent(msg *queue.Message) bool {
+	return false
+}
+
+func (client *client) isCaughtUp() bool {
+	return atomic.LoadInt32(&client.caughtUp) == 1
+}
+
+//IsCaughtUp 是否追上最新高度,
+func (client *client) Query_IsCaughtUp(req *types.ReqNil) (types.Message, error) {
+	if client == nil {
+		return nil, fmt.Errorf("%s", "client not bind message queue.")
+	}
+
+	return &types.IsCaughtUp{Iscaughtup: client.isCaughtUp()}, nil
+}
+
+func (client *client) Query_LocalBlockInfo(req *types.ReqInt) (types.Message, error) {
+	if client == nil {
+		return nil, fmt.Errorf("%s", "client not bind message queue.")
+	}
+
+	var block *pt.ParaLocalDbBlock
+	var err error
+	if req.Height <= -1 {
+		block, err = client.getLastLocalBlock()
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		block, err = client.getLocalBlockByHeight(req.Height)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	blockInfo := &pt.ParaLocalDbBlockInfo{
+		Height:         block.Height,
+		MainHash:       common.ToHex(block.MainHash),
+		MainHeight:     block.MainHeight,
+		ParentMainHash: common.ToHex(block.ParentMainHash),
+		BlockTime:      block.BlockTime,
+	}
+
+	for _, tx := range block.Txs {
+		blockInfo.Txs = append(blockInfo.Txs, common.ToHex(tx.Hash()))
+	}
+
+	return blockInfo, nil
+}
+
+func checkMinerTx(current *types.BlockDetail) error {
+	//检查第一个笔交易的execs, 以及执行状态
+	if len(current.Block.Txs) == 0 {
+		return types.ErrEmptyTx
+	}
+	baseTx := current.Block.Txs[0]
+	//判断交易类型和执行情况
+	var action paracross.ParacrossAction
+	err := types.Decode(baseTx.GetPayload(), &action)
+	if err != nil {
+		return err
+	}
+	if action.GetTy() != pt.ParacrossActionMiner {
+		return paracross.ErrParaMinerTxType
+	}
+	//判断交易执行是否OK
+	if action.GetMiner() == nil {
+		return paracross.ErrParaEmptyMinerTx
+	}
+
+	//判断exec 是否成功
+	if current.Receipts[0].Ty != types.ExecOk {
+		return paracross.ErrParaMinerExecErr
+	}
+	return nil
+}
+
+// Query_CreateNewAccount 通知para共识模块钱包创建了一个新的账户
+func (client *client) Query_CreateNewAccount(acc *types.Account) (types.Message, error) {
+	if acc == nil {
+		return nil, types.ErrInvalidParam
+	}
+	plog.Info("Query_CreateNewAccount", "acc", acc.Addr)
+	// 需要para共识这边处理新创建的账户是否是超级节点发送commit共识交易的账户
+	client.commitMsgClient.onWalletAccount(acc)
+	return &types.Reply{IsOk: true, Msg: []byte("OK")}, nil
+}
+
+// Query_WalletStatus 通知para共识模块钱包锁状态有变化
+func (client *client) Query_WalletStatus(walletStatus *types.WalletStatus) (types.Message, error) {
+	if walletStatus == nil {
+		return nil, types.ErrInvalidParam
+	}
+	plog.Info("Query_WalletStatus", "walletStatus", walletStatus.IsWalletLock)
+	// 需要para共识这边根据walletStatus.IsWalletLock锁的状态开启/关闭发送共识交易
+	client.commitMsgClient.onWalletStatus(walletStatus)
+	return &types.Reply{IsOk: true, Msg: []byte("OK")}, nil
+}
+
+//比较newBlock是不是最优区块
+func (client *client) CmpBestBlock(newBlock *types.Block, cmpBlock *types.Block) bool {
+	return false
+}

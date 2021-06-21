@@ -1,0 +1,862 @@
+syntax = "proto3";
+
+import "transaction.proto";
+
+package types;
+message FinanceAction{
+    oneof value{
+        AddCreditToken addCreditToken = 1;
+        DepositAsset depositAsset = 2;
+		WithdrawlAsset withdrawlAsset = 3;
+		TransferCoins transferCoins = 4;
+		CreateBill createBill = 5;
+		ReleaseBill releaseBill = 6;
+		UnReleaseBill unReleaseBill = 7;
+		ApplyForFinancing applyForFinancing = 8;
+		UnApplyForFinancing unApplyForFinancing = 9;
+		ConfirmFinancing confirmFinancing = 10;
+		CashBill cashBill = 11;
+		RepayBill repayBill = 12;
+		ReportBroken reportBroken = 13;
+		SplitBill splitBill =14;
+		UnSplitBill unSplitBill=15;
+		ConfirmSplitBill confirmSplitBill=16;
+		DeliverBill deliverBill = 17;	
+		UnDeliverBill unDeliverBill = 18;		
+		ConfirmDeliverBill	confirmDeliverBill = 19;
+    }
+    int32 ty = 20;
+}
+
+/***************************AddCreditToken添加授信Token相关操作***************************/
+//添加授信Token
+message AddCreditToken {
+	string	creditAddr = 1; //操作人地址，授信人地址;
+	string  granteeAddr = 2; //被授信人地址;
+	string	symbol = 3; //Token symbol;
+	int64	amount = 4; //授信总额;
+	int64	rate = 5; //融资贴现率;
+	int64   duration = 6; //授信期限, unit: s;
+	string	remark = 7; //备注;
+	int32 creditIndentity =8;//授信人身份标识
+	int32 granteeIndentity =9;//授信人身份标识
+}
+//CreditToken -- state DB 将授信记录写到区块链中
+message CreditTokenStateDB {
+	string	creditAddr = 1; //Token creator
+	string  granteeAddr = 2; //被授信人地址;
+	string	symbol = 3; //Token symbol;
+	int64	amount = 4; //授信总额;
+	int64	rate = 5; //融资贴现率;
+	int64 	addTime = 6; //授信添加时间
+	int64   duration = 7; //授信期限, unit: s;
+	string	remark = 8; //备注;
+}
+//添加授信Token涉及到的日志结构Log，授信资产转账记录
+message ReceiptLogAddCreditToken {
+	int64 expire = 1; //授信到期日
+	AssetTransferTags transfItems = 2; //转帐记录
+}
+//资产转账记录:每个Action的Log都会用到
+message AssetTransferTags {
+	repeated AssetTransferTag items = 1;//267
+}
+message AssetTransferTag {
+	string fromAddr = 1; //转出地址
+	string toAddr = 2; //转入地址
+	string symbol = 3; //资产标识
+	int64  amount = 4; //转帐数额
+	string remark = 5; //转账备注
+}
+//local-DB 存储区块上的信息or state-DB存储交易的信息
+//授信记录--table: Local DB
+message CreditRecordLocalDB {
+	string	creditAddr = 1; //Token creator
+	string  granteeAddr = 2; //被授信人地址;
+	string	symbol = 3; //Token symbol;
+	int64	amount = 4; //授信总额;
+	int64	rate = 5; //融资贴现率;
+	int64 	expire = 6; //授信到期时间 unix time
+	int64   duration = 7; //授信期限, unit: s;
+	string	remark = 8; //备注;
+	int64 blockTime=9;//授信操作的区块链时间
+	string txHash =10;//授信操作txHash
+	int64 height =11;//区块高度
+}
+//执行完添加授信Token之后，就可以查询到相应的信息
+//授信Token查询
+message ReqCreditDetail {
+	string creditSymbol = 1; //被查询授信代币标识
+}
+message ReplyCreditDetail {
+	CreditTokenStateDB credit = 1; //授信详情
+}
+//根据资金方查询授信
+message ReqCreditFunder {
+	string funderAddr = 1; //资金方地址
+	string primaryKey = 2; //用于分页查找
+	int32 entrieCount = 3; //单次返回最大条目数
+}
+message ReplyCreditFunder {
+	int64 blockTime = 1; //当前链上时间
+	repeated CreditRecordLocalDB items = 2; //授信列表
+	string primaryKey = 3; //用于分页查找
+}
+//根据核心企业查询授信
+message ReqCreditCoreFirm {
+	string coreAddr = 1; //核心企业地址
+	string primaryKey = 2; //用于分页查找
+	int32 entrieCount = 3; //单次返回最大条目数
+}
+message ReplyCreditCoreFirm {
+	int64 blockTime = 1; //当前链上时间
+	repeated CreditAsset items = 2; //授信资产信息
+	string primaryKey = 3; //用于分页查找
+}
+message CreditAsset {
+	AssetItem assetItem = 1; //授信资产信息
+	CreditRecordLocalDB CreditItem = 2; //授信详情
+}
+message AssetItem {
+	int64 balance = 1;
+	int64 frozen = 2;
+	string symbol = 3;
+}
+
+/************************DepositAsset存款操作*********************************/
+//用户向合约存款
+message DepositAsset {
+	string depositAddr = 1; //操作人地址,存款地址
+	int64 amount = 2; //存款数量
+	string symbol = 3; //代币符号
+	string remark = 4; //备注，可用于提示存款TxHash
+}
+//Log记录到stateDB中
+message ReceiptLogDepositAsset {
+	AssetTransferTags transfItems = 1; //转帐记录
+}
+//出入金记录(Deposits and withdrawals record) --table: Local DB
+message DWRecordLocalDB {
+	int32 action = 1; //出入金动作
+	int64 amount = 2; //出入金数量
+	string symbol = 3; //代币标识
+	string txHash = 4; //交易哈息
+	int64 timestamp = 5; //记录产生时间（Unix time）
+	string addr=6;//执行出入金动作的地址
+}
+/************************WithdrawlAsset取款操作*********************************/
+//用户向合约取款
+message WithdrawlAsset {
+	string withdrawAddr = 1; //操作人地址，取款地址
+	int64 amount = 2; //存款数量
+	string symbol = 3; //代币符号
+	string remark = 4; //备注，可用于提示取款TxHash
+}
+//Log记录到stateDB中
+message ReceiptLogWithdrawlAsset {
+	AssetTransferTags transfItems = 1; //转帐记录
+}
+
+/************************TransferCoins合约内转账*********************************/
+//合约内转帐
+message TransferCoins {
+	string fromAddr = 1; //操作人地址;
+	string exec = 2; //生成代币的执行器
+	string symbol = 3; //Token Symbol;
+	int64 amount = 4; //转账数额;
+	string toAddr = 5; //收款人地址;
+	string remark = 6; //备注
+}
+//合约内转账记录Log-stateDB
+message ReceiptLogTransferCoins {
+	AssetTransferTags transfItems = 1; //转帐记录
+}
+message TransferCoinsRecordLocalDB{
+	string fromAddr = 1; //操作人地址;
+	string exec = 2; //生成代币的执行器
+	string symbol = 3; //Token Symbol;
+	int64 amount = 4; //转账数额;
+	string toAddr = 5; //收款人地址;
+	string txHash = 6; //交易哈息
+	int64 timestamp = 7; //记录产生时间（Unix time）
+	string remark = 8; //备注
+}
+//查询合约内转账记录
+message ReqTransferCoinsRecord {
+	string addr = 1; //被查询人账户
+	string primaryKey = 2; //用于分页查找
+	int32 entrieCount = 3; //单次返回最大条目数
+	string assetSymbol = 4; //过滤条件
+}
+message ReplyTransferCoinsRecord {
+	repeated TransferCoinsRecordLocalDB items = 1; //出入金记录
+}
+/************************查询账户资产信息*********************************/
+message ReqAccountAsset {
+	string addr = 1; 
+	string symbol = 2;
+	string execer = 3;
+}
+message ReplyAccountAsset {
+	int64 balance = 1;
+	int64 frozen = 2;
+	string addr = 3;
+}
+
+message ReqFinanceUserAssets {
+	string addr = 1; //被查询人地址
+}
+message ReplyFinanceUserAssets {
+	string addr = 1; //被查询人地址
+	repeated AssetItem assetItems = 2; //个人资产列表
+}
+
+//查询出入金数量
+message ReqDWRecord {
+	string addr = 1; //被查询人账户
+	string primaryKey = 2; //用于分页查找
+	int32 entrieCount = 3; //单次返回最大条目数
+	string assetSymbol = 4; //过滤条件
+}
+message ReplyDWRecord {
+	repeated DWRecordLocalDB items = 1; //出入金记录
+}
+
+/******************************CreateBill创建白条*******************************************/
+//创建白条
+message CreateBill {
+	string id = 1; //白条ID
+	string tokenSymbol = 2; //代币标识, 格式如xxxSLDBillID: mytokenSLD5120191124
+	string coinsSymbol = 3; //筹款货币标识
+	string borrower = 4; //借款人账户
+	repeated string guarantor = 5; 
+	int64  loanAmount = 6; //筹款总金额
+
+	int64  rate = 7; //日息，复利计算
+	int64  overdueRate = 8; //逾期日息，复利计算
+	int64  circulationTime = 9; //白条流通时长
+	int32  repayCount = 10; //还款总期数
+	int64  itemAmount = 11; //每期还款金额要根据还款方式及其他参数计算得到
+	int32  repayMethod = 12; //还款方式	0：等额本息
+	bool   anonymous = 13; //是否匿名
+
+	string phone = 14; //借款人手机号
+	string identifier = 15; //借款人身份证号
+	string name = 16; //借款人姓名	
+	string remark = 17; //备注，可用于提示凑款用途
+
+	string addr = 18; //操作人地址
+	int64 waitForGuaranteePeriod = 19; //等待担保人审核时长
+
+	int32 billType = 20; //单据类型（Bill/Bond）
+	int64 overdueGracePeriod = 21; //逾期宽限日
+	int64 overdueLimit = 22; //最大逾期记息时长, unit:days, for bill
+	int64 exLimit = 23; //Exchange limit,转让限制;发行的白条达到一定的标准才运行转让
+
+	bool needDpdtToken = 24; //是否依赖其他代币（应用于供应链金融中的授信通证）
+	repeated DpdtToken  dpdtTokens = 25; //Dependent tokens
+	bool split = 26;//白条币是否允许拆分
+	int32 creatorIndentity=27;//创建白条的人只能是核心企业
+}
+//依赖代币
+message DpdtToken {
+	string	symbol = 1; //依赖代币标识
+	int64 	amount = 2; //使用的授信额度
+	int64   used = 3;   //已使用的融资额度
+}
+//Log
+message ReceiptLogCreateBill{
+	CreateBill createBill =1;
+}
+//白条v2.0 -- state DB
+message Bill {
+	//白条ID
+	string id = 1;
+	//代币标识
+	string tokenSymbol = 2;
+	//筹款货币标识
+	string coinsSymbol = 3;
+	//借款人账户
+	string borrower = 4;
+    //担保人列表
+	repeated GuaranteeInfo guarantees = 5;
+    //筹款总金额 或 票据额度
+	int64  loanAmount = 6;
+	//日息，复利计算
+	int64  rate = 7;
+	//逾期日息，复利计算
+	int64  overdueRate = 8;
+	//白条发行日期,以发布市场或发起到个人为起始点
+	int64  issueDate = 9;
+	//白条流通时长,单位：second(应该以天数来计算总秒数才较准确)
+	int64  circulationTime = 10;
+	//还款总期数
+	int32  repayCount = 11;
+	//每期还款计划
+	repeated  RepayPlan repayItems = 12;
+	//下期还款的截至日期(作为Bill的截至还款日期)，Unit:second 
+	int64  repayDate  = 13;
+	//还款方式
+	int32  repayMethod = 14;
+	//是否匿名	
+	bool   anonymous = 15;
+    //借款人手机号
+	string phone = 16;
+	//借款人身份证号
+	string identifier = 17;
+	//借款人姓名
+	string name = 18;
+	//白条状态:created,issued,blocked
+	int32  status = 19;
+	//备注，可用于提示凑款用途
+	string remark = 20;
+	//白条创建时间
+	int64 createTime = 21;
+    //最近还款时间, Unix time
+	int64 latestRepayDate = 22;
+	//当前已还款期数
+	int32 currentRepayedCount = 23;
+	//当前已兑现的总额度
+	int64 totalCashAmount = 24;
+	//总还款额度CCNY
+	int64 totalRepayAmount = 25;
+	//总的赎回的token数额
+	int64 totalRedeemToken = 26;
+	//总的兑现的Token数
+	int64 totalCashedToken = 27;
+	//已筹款的数额，CCNY...
+	int64 totalCollectedAmount = 28;
+	//等待担保审核时间间隔
+	int64 waitForGuaranteePeriod = 29;
+
+	//每期利率, 根据日息以及每期的天数计算得到
+	int64 rateForPerPeriod = 30;
+
+	//以下各项是为票据应用所添加：bill
+	//Bill类型，目前有：债券和票据（bond/bill）
+	int32 BillType = 31;
+	//票据的起始单价; 根据票据的日息和到期贴现日计算所得
+	int64 originPrice = 32;
+	//逾期宽限期，单位：天
+	int64 overdueGracePeriod = 33;
+	//最大逾期记息时长, unit:days
+	int64 overdueLimit = 34;
+	//转让限制，白条达到一定的出让率才允许转让
+	int64 exLimit = 35;
+
+	//是否依赖其他代币（应用于供应链金融中的授信通证）
+	bool needDpdtToken = 36;
+	//Dependent tokens
+	repeated DpdtToken  dpdtTokens = 37;
+
+	//是否可以拆分白条
+	bool split =38;
+	//拆分白条信息
+	repeated SplitBillInfo splitBill =39;
+}
+message SplitBillInfo{
+	string splitAddr = 1; //拆分白条币操作人地址
+	string toAddr=2;//接收拆分白条币的地址
+	string id = 3; //白条ID
+	int64 amount = 4; //转账额度(拆分了多少个白条币进行转账)
+	string tokenSymbol=5;//白条币标识
+	string remark = 6; //备注
+}
+message GuaranteeInfo {
+	string guarantor = 1; //担保人账户
+	int32  guaranteeRate = 2; //担保比率
+	string guaranteeTxHash = 3; //担保人审核操作哈希
+	int64  frozenAsset = 4; //担保人冻结资产数量
+}
+message RepayPlan {
+	int32 repayPhase = 1; //还款期数,第几期
+	int64 repayAmount = 2; //当期还款总额, 按照还款方式计算得到(CCNY)
+	int64 redeemToken = 3; //当前应赎回的token数,即还的本金(Token)
+}
+
+//作为借款人需要掌握的白条信息 --table: local DB
+message BorrowerBillLocalDB {
+	string id = 1;
+	int32 status = 2; //Holded, Fulfilling, finished
+}
+//查询单个白条信息
+message ReqBillInfo {
+	string id = 1;
+}
+message ReplyBillInfo {
+	Bill BillInfo = 1;
+}
+message ReqBorrowerBill {
+	string addr = 1; //被查询人地址
+	string primaryKey = 2; //用于分页查找
+	int32 entrieCount = 3; //单次返回最大条目数
+	int32 status = 4; //Holded, Fulfilling, finished, deleted
+}
+message ReplyBorrowerBill {
+	repeated BorrowerBillInfo items = 1; //返回的借款人Bill列表
+	string primaryKey = 2; //用于分页查找
+}
+message BorrowerBillInfo {
+	string id = 1; //白条ID
+	int64 loanAmount = 2; //贷款额度
+	ReplyBillRepayInfo detail = 3; //具体的待还款信息
+	int32 status = 4; //Holded, Fulfilling, finished, deleted
+	int64 collectedAmount = 5; //已筹款的数额, CCNY
+	int64 createDate = 6; //白条创建时间
+	int64 waitForGuaranteePeriod = 7; //担保等待时间
+}
+//查询白条的还款信息
+message ReqBillRepayInfo {
+	string id = 1; //白条ID
+}
+//包括：当前应履行的期数，总期数，当前期应还款额，截至还款日期, 当前还款是否包含逾期还款, 逾期日息; 
+message ReplyBillRepayInfo {
+	int32 currentCount = 1; //当前应履行的期数
+	int32 totalRepayCount = 2; //总期数
+	int64 normalRepayAmount = 3; //正常还款金额（每期固定的还款金额）
+	int64 actualRepayAmount = 4; //实际应还款额度
+	int64 repayDueDate  = 5; //当前期的还款到期日
+	bool includeOverdueRepay = 6; //是否包含逾期还款
+	int64 overdueRate = 7; //逾期日息，复利计算
+}
+
+/*******************************ReleaseBill发行白条操作*******************************************/
+//发行白条； 不允许相同的白条发行多次，故发行之前要做检查;
+message ReleaseBill {
+	string releaseAddr = 1; //操作人地址;
+	string id = 2; //白条ID;
+	int32 releaseIndentity =3;//发行白条的只能是核心企业
+}
+message ReceiptLogReleaseBill{
+	string id =1;//白条Id
+	int32 state=2;//白条状态:1 创建的白条,2 已发行白条,3 被赎回的白条,4 被删除的白条
+}
+/*******************************UnReleaseBill发行白条操作*****************************************/
+//撤销发行; 如果白条一旦被别人持有，则撤回失败;
+message UnReleaseBill {
+	string unReleaseAddr = 1; //操作人地址;
+	string id = 2; //白条ID;
+	int32 unReleaseIndentity =3;//撤发行白条的只能是核心企业
+}
+message ReceiptLogUnReleaseBill{
+	string id =1;//白条Id
+	int32 state=2;//白条状态:1 创建的白条,2 已发行白条,3 被赎回的白条,4 被删除的白条
+}
+/*******************************SplitBill拆分白条操作*****************************************/
+message SplitBill{
+	string splitAddr = 1; //拆分白条币操作人地址
+	string toAddr=2;//接收拆分白条币的地址
+	string billID = 3; //白条ID
+	int64 amount = 4; //转账额度(拆分了多少个白条币进行转账)
+	string tokenSymbol=5;//白条币标识
+	string remark = 6; //备注
+	int32 splitIndentity=7;//拆分白条的身份是供应商
+	int32 toIndentity=8;//接收拆分白条的身份是供应商
+}
+//LocalDB
+message SplitBillRecordLocalDB{
+	string splitAddr = 1; //拆分白条币操作人地址
+	string toAddr=2;//接收拆分白条币的地址
+	string billID = 3; //白条ID
+	int64 amount = 4; //转账额度(拆分了多少个白条币进行转账)
+	string tokenSymbol=5;//白条币标识
+	string remark = 6; //备注
+	int64 blockTime=7;//拆分白条操作的区块链时间
+	string txHash =8;//拆分白条操作txHash
+}
+//查询融資信息
+message ReqSplitBillList {
+	string primaryKey = 1; //用于分页查找
+	int32 entrieCount = 2; //单次返回最大条目数
+
+	string splitAddr = 3; //拆分白条币操作人地址
+	string toAddr=4;//接收拆分白条币的地址
+	string txHash = 5; //拆分白条的交易hash
+}
+message ReplySplitBillList {
+	repeated SplitBillRecordLocalDB items = 1; //拆分申请列表
+	string primaryKey = 2; //用于分页查找
+}
+/*******************************UnSplitBill撤销拆分白条操作*****************************************/
+message UnSplitBill{
+	string unSplitAddr = 1; //撤销拆分白条币操作人地址
+	string txHash = 2; //拆分白条的txHash
+	string remark=3;//备注
+	int32 unSplitIndentity=4;//撤销拆分白条的身份是供应商
+}
+/*******************************ConfirmSplitBill确认收取拆分白条操作*****************************************/
+message ConfirmSplitBill{
+	string confirmAddr = 1; //确认收取拆分白条币操作人地址
+	string txHash = 2; //拆分白条的txHash
+	string remark=3;//备注
+	bool ack=4;//接收应答，同意或拒绝
+	int32 confirmIndentity=5;//撤销拆分白条的身份是供应商
+}
+//Log
+message ReceiptLogConfirmSplitBill {
+	AssetTransferTags transfItems = 1; //转帐记录
+}
+/*******************************ApplyForFns申请融资*****************************************/
+//申请融资
+message ApplyForFinancing {
+	string 	applyAddr = 1; //操作人地址
+	string  id = 2; //白条ID
+	int64	amount = 3; //申请额度
+	string  dpdtSymbol = 4; //授信通证标识
+	string	remark = 5; //备注
+	int32 applyIndentity =6;//融資申请人身份标识(供应商)
+}
+
+//申请融资列表(ApplyFnsItem) --table: local DB
+message ApplyFinancingItemLocalDB {
+	string 	ApplyAddr = 1; //申请人地址
+	string  id = 2; //白条ID
+	int64	amount = 3; //申请额度
+	string  dpdtSymbol = 4; //授信通证标识
+	string	txHash = 5; //申请哈息
+	int64	timestamp = 6;//申请创建时间
+	string  CreditorAddr = 7; //授信人地址
+	string	remark = 8; //备注
+}
+
+//查询融資信息
+message ReqApplyList {
+	string primaryKey = 1; //用于分页查找
+	int32 entrieCount = 2; //单次返回最大条目数
+
+	string creditorAddr = 3; //授信人地址
+	string applyAddr = 4; //申请人地址
+	string dpdtSymbol = 5; //授信代币标识
+	string BillID = 6; //白条ID
+	string txHash = 7; //申请hash
+}
+message ReplyApplyList {
+	repeated ApplyFinancingItemLocalDB items = 1; //白条申请列表
+	string primaryKey = 2; //用于分页查找
+}
+
+/*******************************UnApplyForFns撤销融资申请*****************************************/
+//撤销融资申请
+message UnApplyForFinancing {
+	string 	unApplyAddr = 1; //操作人地址
+	string  id = 2; //白条ID
+	string  txHash = 3; //融资申请Hash
+	int32 unApplyIndentity =4;//撤销融資申请人身份标识(供应商)
+}
+
+/*******************************ConfirmFns确认融资申请*****************************************/
+//确认融资
+message ConfirmFinancing {
+	string confirmAddr = 1; //操作人地址
+	bool ack = 2; //融资应答，同意或不同意
+	string txHash = 3; //对应的融资单号
+	int32 confirmIndentity =4;//确认融資人身份标识(资金方)
+	string remark =5;//备注
+}
+//Log
+message ReceiptLogConfirmFinancing {
+	AssetTransferTags transfItems = 1; //转帐记录
+}
+/*******************************CashBill白条持有人兑现*****************************************/
+//白条持有人兑现;
+message CashBill{
+	string cashAddr = 1; //操作人地址;
+	string tokenSymbol = 2; //代币标识符;
+	int64 amount = 3; //兑现数量;
+}
+//Log
+message ReceiptLogCashBill{
+	CashRecordLocalDB record = 1; //兑现记录
+	AssetTransferTags transfItems = 2; //转帐记录
+}
+//白条持有人兑现记录 --table: local DB
+message CashRecordLocalDB{
+	string cashAddr = 1; //操作人地址
+	string BillId = 2; //白条id
+	string txHash = 3; //交易hash
+	int64 amount = 4; //交易的token数量
+	int64 value = 5; //交易的token价值
+	int64 timestamp = 6; //兑现发生时间
+	int32 BillStatus = 7; //白条状态
+	int32 BillType = 8; //Bill type
+}
+//Token兑现列表 --table: local DB
+message CashList{
+	string BillId = 1; //白条ID
+	int64  amount = 2; //兑现的token数量
+	string txHash = 3; //兑现hash,可用于撤销兑现
+	string tokenOwner = 4; //token拥有者
+	int64  timestamp = 5; //发起兑现的时间戳，可用于计算是否逾期
+}
+//查询
+message ReqCashList {
+	string id = 1; //白条ID
+	string primaryKey = 2; //用于分页查找
+	int32 entrieCount = 3; //单次返回最大条目数
+	string tokenOwner = 4; //过滤条件
+}
+message ReplyCashList {
+	repeated CashList cashItems = 1; //白条兑现列表
+}
+//查询指定白条的兑现记录
+message ReqCashRecord {
+	string id = 1;
+}
+message ReplyCashRecord {
+	repeated CashRecordLocalDB items = 1; //返回兑现记录
+}
+//查询票据的还款信息 ReplyBillRepayInfo在借款人那边
+// message ReqBillRepayInfo{
+// 	string id = 1; //白条ID
+// }
+/*******************************RepayBill还款*****************************************/
+//还款;
+message RepayBill {
+	string repayAddr = 1; //操作人地址;
+	string id = 2; //白条ID;
+}
+//Log
+message ReceiptLogRepayBill {
+	RepayRecordLocalDB record = 1; //还款记录
+	AssetTransferTags transfItems = 2; //转帐记录
+}
+//还款记录,以BillID作为Key --table: local DB
+message RepayRecordLocalDB {
+	string repayAddr = 1; //操作人地址
+	string BillId = 2; //白条id
+	string txHash = 3; //还款hash
+	int64 value = 4; //还款额度(token价值)
+	int64 timestamp = 5; //记录产生时间（Unix time）
+	bool isArrearsCleared = 6; //欠款是否已结清
+	string BillCreator = 7;//白条创建者（借款人）
+	int32 BillType = 8; //Bill type
+	repeated string cashHashes = 9; //兑现的Hash列表
+}
+
+//查询指定白条的还款记录
+message ReqRepayRecord {
+	string id = 1;
+}
+message ReplyRepayRecord {
+	repeated RepayRecordLocalDB items = 1; //返回还款记录
+}
+//查询票据的还款信息
+// message ReqBillRepayInfo{
+// 	string id = 1; //白条ID
+// }
+/******************************查询token当前的价值*********************************************/
+message ReqTokenValue {
+	string id = 1; //白条ID
+	int64  amount = 2;//Token数额
+}
+message ReplyTokenValue{
+	int64  value = 1; //对应的CCNY价值
+}
+/******************************ReportBroken报告失信行为*********************************************/
+//报告失信行为
+message ReportBroken {
+	string reportAddr = 1; //操作人地址
+	string id = 2; //白条ID
+}
+//StateDB
+message BrokenRecordStateDB{
+	string borrowerAddr = 1; //借款人账户
+	string phone = 2; //借款人手机号
+	string identifier = 3; //借款人身份证号
+	string name = 4; //借款人姓名
+	string BillId = 5; //白条id
+	string txHash = 6; //举报hash
+	int64 overdueDays = 7; //逾期天数
+	int64 overdueValue = 8; //逾期金额
+}
+//查询失信列表
+message ReqBrokenList {
+	string addr = 1; //白条创建人地址，被举报人地址
+	string primaryKey = 2; //用于分页查找
+	int32 entrieCount = 3; //单次返回最大条目数
+	string phone = 4; //被举报人手机号
+	string from = 5; //举报人操作人地址
+}
+message ReplyBrokenList {
+	repeated BrokenRecordStateDB items = 1; //返回失信列表
+	string primaryKey = 2; //用于分页查找
+}
+
+/******************************DeliverBill交付白条相关操作*********************************************/
+//白条交付 因为是足额交付，所以不需要指定交付数量
+message DeliverBill {
+	string	deliverAddr = 1; //操作人地址, 交付方
+	string	billID = 2; //白条ID
+	int64 	amount = 3; //交付额度
+	string	toAddr = 4; //被交付方地址
+	string	remark = 5;
+	int32 deliverIndentity=6;//交付人的身份必须是核心企业
+	int32 toIndentity=7;//被交付人的身份必须是供应商
+}
+//白条交付条目 --table: Local DB
+message DeliverItemLocalDB {
+	string	deliverAddr = 1; //交付人地址
+	string	toAddr = 2; //被交付人地址
+	string 	billID = 3; //白条ID
+	int64 	amount = 4; //交付额度
+	string	deliverID = 5; //申请交付的txHash
+	int64   timestamp = 6; //申请交付创建时间
+	string 	remark = 7; //备注
+}
+//查询相关
+message ReqDeliverList {
+	string primaryKey = 1; //用于分页查找
+	int32 entrieCount = 2; //单次返回最大条目数
+
+	string deliverID = 3; //交付ID 就是txHash
+	string deliverAddr = 4; //交付人地址
+	string toAddr = 5;	//被交付人地址
+}
+message ReplyDeliverList {
+	repeated DeliverItemLocalDB items = 1; //白条交付申请列表
+	string primaryKey = 2; //用于分页查找
+}
+/******************************ConfirmDeliverBill确认交付白条相关操作*********************************************/
+//确认交付
+message ConfirmDeliverBill {
+	string	confirmAddr = 1; //操作人地址,确认交付的地址必须是供应商
+	string	deliverID = 2; //交付ID,即交付申请ID,就是交易hash
+	bool 	ack = 3; //交付应答，同意或拒绝
+	string	remark = 4;
+	int32 confirmIndentity=5;//确认交付的身份是供应商
+}
+//Log
+message ReceiptLogConfirmDeliver {
+	AssetTransferTags transfItems = 1; //转帐记录
+}
+/******************************UnDeliverBill撤销交付白条相关操作*********************************************/
+//撤销交付
+message UnDeliverBill {
+	string  unDeliverAddr = 1; //撤销交付
+	string	deliverID = 2; //交付ID
+	string	remark = 3;
+	int32 unDeliverIndentity=5;//撤销交付的身份是核心企业
+}
+
+/***************************************************************************/
+
+//RPC API 
+service finance{
+    //存款操作1
+    rpc CreateDepositAsset(DepositAsset) returns(UnsignTx) {}
+    //取款操作
+	rpc CreateWithdrawlAsset(WithdrawlAsset) returns(UnsignTx) {}
+    //合约内转账
+    rpc CreateTransferCoins(TransferCoins) returns(UnsignTx) {}
+
+    //查询合约子账户资产1
+	//查询用户指定合约下token symbol资产的信息1
+	rpc QueryAccountAsset(ReqAccountAsset) returns(ReplyAccountAsset) {}
+	//查询用户所有合约下，所有token symbol资产的信息1
+	rpc QueryUserAssets(ReqFinanceUserAssets) returns(ReplyFinanceUserAssets){}
+
+    //查询出入金记录1
+	rpc QueryDWRecord(ReqDWRecord) returns(ReplyDWRecord) {}
+	//以token symbol为条件过滤出入金记录 1
+	rpc QueryDWRecordBySymbol(ReqDWRecord) returns(ReplyDWRecord) {}
+	//通过Addr为条件过滤出入金记录1
+	rpc QueryDWRecordByAddr(ReqDWRecord) returns(ReplyDWRecord) {}
+	//查询合约内转账记录
+	rpc QueryTransferCoinsRecord(ReqTransferCoinsRecord) returns(ReplyTransferCoinsRecord) {}
+	rpc QueryTransferCoinsRecordByAddr(ReqTransferCoinsRecord) returns(ReplyTransferCoinsRecord) {}
+	rpc QueryTransferCoinsRecordBySymbol(ReqTransferCoinsRecord) returns(ReplyTransferCoinsRecord) {}
+
+    //添加授信Token
+    rpc CreateAddCreditToken(AddCreditToken) returns(UnsignTx){}
+    //查看具体授信
+	rpc QueryCreditDetail(ReqCreditDetail) returns(ReplyCreditDetail) {}
+	//为资金方查询授信
+	rpc QueryCreditForFunder(ReqCreditFunder) returns(ReplyCreditFunder) {}
+	//为核心企业查询授信
+	rpc QueryCreditForCoreFirm(ReqCreditCoreFirm) returns(ReplyCreditCoreFirm) {}
+    
+	//创建白条信息
+	rpc CreateFinanceBill(CreateBill) returns(UnsignTx) {}
+	//查询具体白条信息	
+	rpc QueryBillInfo(ReqBillInfo) returns(ReplyBillInfo) {}
+	//查询和借款人相关的Bill信息
+	rpc QueryBorrowerBill(ReqBorrowerBill) returns(ReplyBorrowerBill) {}
+	//ReleaseBill发行白条之后能查看到相应的还款信息
+	rpc QueryBorrowerBillByStatus(ReqBorrowerBill) returns(ReplyBorrowerBill) {}
+	
+	//发行白条
+	rpc CreateReleaseBill(ReleaseBill) returns(UnsignTx) {}
+	//撤销发布白条
+	rpc CreateUnReleaseBill(UnReleaseBill) returns(UnsignTx) {}
+	//查询已发行未发布的白条列表，RBNP：Released but not published 没有写用不到
+	rpc QueryBorrowerBillRBNP(ReqBorrowerBill) returns(ReplyBorrowerBill) {}
+
+	//拆分白条操作
+	rpc CreateSplitBill(SplitBill) returns(UnsignTx) {}
+	rpc CreateUnSplitBill(UnSplitBill) returns(UnsignTx) {}
+	rpc CreateConfirmSplitBill(ConfirmSplitBill) returns(UnsignTx) {}
+	//查询拆分白条信息,通过txHash、SplitAddr、ToAddr
+	rpc QuerySplitBillByTxHash(ReqSplitBillList) returns(ReplySplitBillList) {}
+	rpc QuerySplitBillBySplitAddr(ReqSplitBillList) returns(ReplySplitBillList) {}
+	rpc QuerySplitBillByToAddr(ReqSplitBillList) returns(ReplySplitBillList) {}
+
+	//申请融资
+	rpc CreateApplyForFinancing(ApplyForFinancing) returns(UnsignTx) {}
+	//撤销融资申请
+	rpc CreateUnApplyForFinancing(UnApplyForFinancing) returns(UnsignTx) {}
+	//根据申请哈息请求融资申请列表
+	rpc QueryApplyFinancingListByTxHash(ReqApplyList) returns(ReplyApplyList) {}
+	//根据授信人请求融资申请列表
+	rpc QueryApplyFinancingListByCreditor(ReqApplyList) returns(ReplyApplyList) {}
+	//根据申请人请求融资申请列表
+	rpc QueryApplyFinancingListByApplicant(ReqApplyList) returns(ReplyApplyList) {}
+	//根据白条ID请求融资申请列表
+	rpc QueryApplyFinancingListByBillID(ReqApplyList) returns(ReplyApplyList) {}
+	//根据授信标识请求融资申请列表
+	rpc QueryApplyFinancingListByDpdtSmybol(ReqApplyList) returns(ReplyApplyList) {}
+
+	//确认融资
+	rpc CreateConfirmFinancing(ConfirmFinancing) returns(UnsignTx) {}
+	
+	//查询token当前价值 根据token的数量查看token当前的价值
+	rpc QueryTokenValue(ReqTokenValue) returns(ReplyTokenValue) {}
+
+	//白条持有人兑现
+	rpc CreateCashBill(CashBill) returns(UnsignTx) {}
+	//查询票据兑现列表
+	rpc QueryCashList(ReqCashList) returns(ReplyCashList) {}
+	//以tokenOwner为条件过滤票据兑现列表
+	rpc QueryCashListByTokenOwner(ReqCashList) returns(ReplyCashList) {}
+	//查询指定白条的兑现记录:inAmount, outValue
+	rpc QueryBillCashRecord(ReqCashRecord) returns(ReplyCashRecord) {}
+	//查询票据的还款信息 这个可以查到想要的信息，根据兑现列表进行还款信息查询
+	rpc QueryBillRepayInfo(ReqBillRepayInfo) returns(ReplyBillRepayInfo) {}
+
+	//还款
+	rpc CreateRepayBill(RepayBill) returns(UnsignTx) {}
+	//只有发布的白条可以进行这个查询，查询对应白条的还款信息，包括：当前期数，总期数，当前期应还款额，正常还款额度，截至还款日期, 当前还款是否包含逾期还款, 逾期日息;  
+	rpc QueryRepayInfo(ReqBillRepayInfo) returns(ReplyBillRepayInfo) {} 
+	//查询指定白条的还款记录 这个可以查到想要的信息
+	rpc QueryBillRepayRecord(ReqRepayRecord) returns(ReplyRepayRecord) {}
+
+	//举报失信人
+	rpc CreateReportBroken(ReportBroken) returns(UnsignTx) {}
+	//查询黑名单列表，对外开放;逾期已还款的用户将不会出现在黑名单列表中
+	rpc QueryBillBrokenList(ReqBrokenList) returns(ReplyBrokenList) {}
+	//通过手机号查询黑名单列表
+	rpc QueryBillBrokenListByPhone(ReqBrokenList) returns(ReplyBrokenList) {}
+	//通过账户地址查询黑名单列表
+	rpc QueryBillBrokenListByAddr(ReqBrokenList) returns(ReplyBrokenList) {}
+
+	//白条交付操作相关
+	rpc CreateDeliverBill(DeliverBill) returns(UnsignTx) {}
+	rpc CreateConfirmDeliverBill(ConfirmDeliverBill) returns(UnsignTx) {}
+	rpc CreateUnDeliverBill(UnDeliverBill) returns(UnsignTx) {}
+	//根据Hash查询交付条目
+	rpc QueryDeliverListByDeliverID(ReqDeliverList) returns(ReplyDeliverList) {}
+	//根据交付人地址查询交付条目
+	rpc QueryDeliverListByDeliverAddr(ReqDeliverList) returns(ReplyDeliverList) {}
+	//根据被交付人地址查询交付条目
+	rpc QueryDeliverListByPeerAddr(ReqDeliverList) returns(ReplyDeliverList) {}
+}
+
